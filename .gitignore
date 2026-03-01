@@ -37,3 +37,5 @@ desktop.ini
 # 旧文件
 game.js
 /game
+
+web/dist/**

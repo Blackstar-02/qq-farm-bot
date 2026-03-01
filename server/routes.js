@@ -251,6 +251,37 @@ router.get('/accounts/:uin/lands', canAccessUin, async (req, res) => {
     }
 });
 
+/** GET /api/accounts/:uin/friends - 获取好友列表 */
+router.get('/accounts/:uin/friends', canAccessUin, async (req, res) => {
+    try {
+        const bot = botManager.bots.get(req.params.uin);
+        if (!bot || bot.status !== 'running') {
+            return res.status(400).json({ ok: false, error: 'Bot 未运行' });
+        }
+        const reply = await bot.getAllFriends();
+        const friends = Array.isArray(reply?.game_friends) ? reply.game_friends : [];
+        const data = friends.map((f) => {
+            const openId = String(f.open_id || '').trim();
+            const qq = /^\d+$/.test(openId) ? openId : '';
+            return {
+                gid: Number(f.gid || 0),
+                qq,
+                openId,
+                name: f.name || '',
+                remark: f.remark || '',
+                level: Number(f.level || 0),
+                stealNum: Number(f?.plant?.steal_plant_num || 0),
+                dryNum: Number(f?.plant?.dry_num || 0),
+                weedNum: Number(f?.plant?.weed_num || 0),
+                insectNum: Number(f?.plant?.insect_num || 0),
+            };
+        });
+        res.json({ ok: true, data });
+    } catch (err) {
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
 /** GET /api/accounts/:uin/snapshot - 获取详细快照 (含功能开关、统计) */
 router.get('/accounts/:uin/snapshot', canAccessUin, (req, res) => {
     try {
@@ -259,12 +290,35 @@ router.get('/accounts/:uin/snapshot', canAccessUin, (req, res) => {
             // 从 DB 返回基础信息
             const user = db.getUserByUin(req.params.uin);
             if (!user) return res.status(404).json({ ok: false, error: '账号不存在' });
+            let featureToggles = null;
+            try { featureToggles = user.feature_toggles ? JSON.parse(user.feature_toggles) : null; } catch { featureToggles = null; }
             return res.json({
                 ok: true, data: {
                     userId: user.uin, status: 'stopped',
                     userState: { name: user.nickname, level: user.level, gold: user.gold, exp: user.exp, gid: user.gid },
-                    featureToggles: null, dailyStats: null,
+                    farmInterval: user.farm_interval || 10000,
+                    friendInterval: user.friend_interval || 10000,
+                    featureToggles, dailyStats: null,
                     preferredSeedId: user.preferred_seed_id || 0,
+                    napcatNotify: {
+                        matureEnabled: user.napcat_notify_mature_enabled !== undefined && user.napcat_notify_mature_enabled !== null
+                            ? !!user.napcat_notify_mature_enabled
+                            : !!user.napcat_notify_enabled,
+                        helpEnabled: user.napcat_notify_help_enabled !== undefined && user.napcat_notify_help_enabled !== null
+                            ? !!user.napcat_notify_help_enabled
+                            : !!user.napcat_notify_enabled,
+                        enabled: (
+                            (user.napcat_notify_mature_enabled !== undefined && user.napcat_notify_mature_enabled !== null
+                                ? !!user.napcat_notify_mature_enabled
+                                : !!user.napcat_notify_enabled) ||
+                            (user.napcat_notify_help_enabled !== undefined && user.napcat_notify_help_enabled !== null
+                                ? !!user.napcat_notify_help_enabled
+                                : !!user.napcat_notify_enabled)
+                        ),
+                        baseUrl: user.napcat_base_url || '',
+                        groupId: user.napcat_group_id || '',
+                        accessToken: user.napcat_access_token || '',
+                    },
                 }
             });
         }
@@ -277,10 +331,8 @@ router.get('/accounts/:uin/snapshot', canAccessUin, (req, res) => {
 /** PUT /api/accounts/:uin/toggles - 更新功能开关 */
 router.put('/accounts/:uin/toggles', canAccessUin, (req, res) => {
     try {
-        const bot = botManager.bots.get(req.params.uin);
-        if (!bot) return res.status(400).json({ ok: false, error: 'Bot 未运行' });
-        bot.setFeatureToggles(req.body || {});
-        res.json({ ok: true, data: bot.featureToggles });
+        const toggles = botManager.updateAccountToggles(req.params.uin, req.body || {});
+        res.json({ ok: true, data: toggles });
     } catch (err) {
         res.status(500).json({ ok: false, error: err.message });
     }

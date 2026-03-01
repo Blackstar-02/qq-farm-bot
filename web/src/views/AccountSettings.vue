@@ -12,6 +12,16 @@
           <el-input-number v-model="friendIntervalSec" :min="1" :max="3600" :step="1" />
           <span class="unit">秒 (最低1秒)</span>
         </el-form-item>
+        <el-form-item label="好友巡查白名单">
+          <el-input
+            v-model="friendWhitelist"
+            type="textarea"
+            :rows="3"
+            placeholder="填写好友 GID，支持逗号/空格/换行分隔；留空表示巡查全部好友"
+            style="width: 420px"
+          />
+          <span class="unit">仅巡查白名单好友</span>
+        </el-form-item>
         <el-form-item label="指定种植作物">
           <el-select
             v-model="preferredSeedId"
@@ -36,6 +46,16 @@
             </el-option>
           </el-select>
           <span class="unit">清空则自动选择</span>
+        </el-form-item>
+        <el-form-item label="NapCat Base URL">
+          <el-input v-model="napcatBaseUrl" placeholder="e.g. http://127.0.0.1:3001" style="width: 360px" clearable />
+          <span class="unit">Accepts root URL or URL ending with /api</span>
+        </el-form-item>
+        <el-form-item label="QQ Group ID">
+          <el-input v-model="napcatGroupId" placeholder="e.g. 123456789" style="width: 240px" clearable />
+        </el-form-item>
+        <el-form-item label="Access Token">
+          <el-input v-model="napcatAccessToken" placeholder="Optional, required when NapCat auth is enabled" style="width: 360px" show-password clearable />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="saveConfig" :loading="saving">保存配置</el-button>
@@ -103,7 +123,12 @@ const props = defineProps({ uin: String })
 
 const farmIntervalSec = ref(1)
 const friendIntervalSec = ref(10)
+const friendWhitelist = ref('')
 const preferredSeedId = ref(29999)  // 29999 = 白萝卜仙人
+
+const napcatBaseUrl = ref('')
+const napcatGroupId = ref('')
+const napcatAccessToken = ref('')
 const saving = ref(false)
 const userLevel = ref(1)
 
@@ -118,9 +143,13 @@ async function fetchConfig() {
     const data = res.data
     farmIntervalSec.value = Math.round((data.farmInterval || 1000) / 1000)
     friendIntervalSec.value = Math.round((data.friendInterval || 10000) / 1000)
+    friendWhitelist.value = data.friendWhitelist || ''
     userLevel.value = data.userState?.level || 1
     // 显式判断，保留 0 表示自动选择
     preferredSeedId.value = data.preferredSeedId ?? 0
+    napcatBaseUrl.value = data.napcatNotify?.baseUrl || ''
+    napcatGroupId.value = data.napcatNotify?.groupId || ''
+    napcatAccessToken.value = data.napcatNotify?.accessToken || ''
   } catch { /* */ }
 }
 
@@ -130,7 +159,11 @@ async function saveConfig() {
     await updateAccountConfig(props.uin, {
       farmInterval: farmIntervalSec.value * 1000,
       friendInterval: friendIntervalSec.value * 1000,
+      friendWhitelist: friendWhitelist.value,
       preferredSeedId: preferredSeedId.value || 0,
+      napcatBaseUrl: napcatBaseUrl.value.trim(),
+      napcatGroupId: napcatGroupId.value.trim(),
+      napcatAccessToken: napcatAccessToken.value.trim(),
     })
     ElMessage.success('配置已保存')
   } catch (e) {

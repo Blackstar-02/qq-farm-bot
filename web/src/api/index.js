@@ -64,6 +64,10 @@ export function getAccountLands(uin) {
   return api.get(`/accounts/${uin}/lands`)
 }
 
+export function getAccountFriends(uin) {
+  return api.get(`/accounts/${uin}/friends`)
+}
+
 export function getAccountLogs(uin, limit = 500) {
   return api.get(`/accounts/${uin}/logs`, { params: { limit } })
 }

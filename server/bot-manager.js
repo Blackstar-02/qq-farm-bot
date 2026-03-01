@@ -14,6 +14,27 @@ const db = require('./database');
 const { requestQrLogin, getQrCodeBase64 } = require('./qr-service');
 const { CONFIG } = require('../src/config');
 
+function parseFeatureToggles(raw) {
+    if (!raw) return null;
+    if (typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function resolveNapcatNotifyFlags(raw = {}) {
+    const legacyEnabled = !!raw.napcat_notify_enabled;
+    const hasMatureFlag = raw.napcat_notify_mature_enabled !== undefined && raw.napcat_notify_mature_enabled !== null;
+    const hasHelpFlag = raw.napcat_notify_help_enabled !== undefined && raw.napcat_notify_help_enabled !== null;
+    return {
+        matureEnabled: hasMatureFlag ? !!raw.napcat_notify_mature_enabled : legacyEnabled,
+        helpEnabled: hasHelpFlag ? !!raw.napcat_notify_help_enabled : legacyEnabled,
+    };
+}
+
 class BotManager extends EventEmitter {
     constructor() {
         super();
@@ -33,6 +54,7 @@ class BotManager extends EventEmitter {
     listAccounts() {
         const users = db.getAllUsers();
         return users.map(u => {
+            const notifyFlags = resolveNapcatNotifyFlags(u);
             const bot = this.bots.get(u.uin);
             if (bot) {
                 const snap = bot.getSnapshot();
@@ -48,6 +70,12 @@ class BotManager extends EventEmitter {
                     platform: u.platform,
                     farmInterval: u.farm_interval,
                     friendInterval: u.friend_interval,
+                    friendWhitelist: u.friend_whitelist || '',
+                    napcatNotifyEnabled: notifyFlags.matureEnabled || notifyFlags.helpEnabled,
+                    napcatNotifyMatureEnabled: notifyFlags.matureEnabled,
+                    napcatNotifyHelpEnabled: notifyFlags.helpEnabled,
+                    napcatBaseUrl: u.napcat_base_url || '',
+                    napcatGroupId: u.napcat_group_id || '',
                     autoStart: !!u.auto_start,
                     startedAt: snap.startedAt,
                     uptime: snap.uptime,
@@ -66,6 +94,12 @@ class BotManager extends EventEmitter {
                 platform: u.platform,
                 farmInterval: u.farm_interval,
                 friendInterval: u.friend_interval,
+                friendWhitelist: u.friend_whitelist || '',
+                napcatNotifyEnabled: notifyFlags.matureEnabled || notifyFlags.helpEnabled,
+                napcatNotifyMatureEnabled: notifyFlags.matureEnabled,
+                napcatNotifyHelpEnabled: notifyFlags.helpEnabled,
+                napcatBaseUrl: u.napcat_base_url || '',
+                napcatGroupId: u.napcat_group_id || '',
                 autoStart: !!u.auto_start,
                 startedAt: null,
                 uptime: 0,
@@ -112,6 +146,7 @@ class BotManager extends EventEmitter {
                 friendInterval: opts.friendInterval || CONFIG.friendCheckInterval,
             });
         }
+        const notifyFlags = resolveNapcatNotifyFlags(user);
 
         // 请求二维码
         const { loginCode, url } = await requestQrLogin();
@@ -122,6 +157,13 @@ class BotManager extends EventEmitter {
             uin, loginCode, url, platform,
             farmInterval: opts.farmInterval || user.farm_interval || CONFIG.farmCheckInterval,
             friendInterval: opts.friendInterval || user.friend_interval || CONFIG.friendCheckInterval,
+            friendWhitelist: opts.friendWhitelist !== undefined ? String(opts.friendWhitelist || '') : (user.friend_whitelist || ''),
+            featureToggles: parseFeatureToggles(user.feature_toggles),
+            napcatNotifyMatureEnabled: notifyFlags.matureEnabled,
+            napcatNotifyHelpEnabled: notifyFlags.helpEnabled,
+            napcatBaseUrl: user.napcat_base_url || '',
+            napcatGroupId: user.napcat_group_id || '',
+            napcatAccessToken: user.napcat_access_token || '',
             createdAt: Date.now(),
         };
         this.qrSessions.set(uin, session);
@@ -215,7 +257,18 @@ class BotManager extends EventEmitter {
             platform: opts.platform || 'qq',
             farmInterval: opts.farmInterval || CONFIG.farmCheckInterval,
             friendInterval: opts.friendInterval || CONFIG.friendCheckInterval,
+            friendWhitelist: opts.friendWhitelist || '',
             preferredSeedId: opts.preferredSeedId || 0,
+            featureToggles: parseFeatureToggles(opts.featureToggles),
+            napcatNotifyMatureEnabled: opts.napcatNotifyMatureEnabled !== undefined
+                ? !!opts.napcatNotifyMatureEnabled
+                : !!opts.napcatNotifyEnabled,
+            napcatNotifyHelpEnabled: opts.napcatNotifyHelpEnabled !== undefined
+                ? !!opts.napcatNotifyHelpEnabled
+                : !!opts.napcatNotifyEnabled,
+            napcatBaseUrl: opts.napcatBaseUrl || '',
+            napcatGroupId: opts.napcatGroupId || '',
+            napcatAccessToken: opts.napcatAccessToken || '',
         });
 
         // 监听事件并转发给 BotManager 的事件总线
@@ -270,11 +323,19 @@ class BotManager extends EventEmitter {
         const code = db.getSession(uin);
         if (!code) throw new Error('没有保存的登录凭证，请重新扫码');
         const user = db.getUserByUin(uin);
+        const notifyFlags = resolveNapcatNotifyFlags(user || {});
         await this._startBot(uin, code, {
             platform: user?.platform || 'qq',
             farmInterval: user?.farm_interval || 10000,
             friendInterval: user?.friend_interval || 10000,
+            friendWhitelist: user?.friend_whitelist || '',
             preferredSeedId: user?.preferred_seed_id || 0,
+            featureToggles: parseFeatureToggles(user?.feature_toggles),
+            napcatNotifyMatureEnabled: notifyFlags.matureEnabled,
+            napcatNotifyHelpEnabled: notifyFlags.helpEnabled,
+            napcatBaseUrl: user?.napcat_base_url || '',
+            napcatGroupId: user?.napcat_group_id || '',
+            napcatAccessToken: user?.napcat_access_token || '',
         });
     }
 
@@ -302,13 +363,29 @@ class BotManager extends EventEmitter {
     /**
      * 修改账号配置
      */
-    updateAccountConfig(uin, { farmInterval, friendInterval, autoStart, platform, preferredSeedId }) {
+    updateAccountConfig(uin, {
+        farmInterval, friendInterval, friendWhitelist, autoStart, platform, preferredSeedId,
+        napcatNotifyEnabled, napcatNotifyMatureEnabled, napcatNotifyHelpEnabled,
+        napcatBaseUrl, napcatGroupId, napcatAccessToken
+    }) {
         const updates = {};
         if (farmInterval !== undefined) updates.farm_interval = farmInterval;
         if (friendInterval !== undefined) updates.friend_interval = friendInterval;
+        if (friendWhitelist !== undefined) updates.friend_whitelist = String(friendWhitelist || '');
         if (autoStart !== undefined) updates.auto_start = autoStart ? 1 : 0;
         if (platform !== undefined) updates.platform = platform;
         if (preferredSeedId !== undefined) updates.preferred_seed_id = preferredSeedId;
+        if (napcatNotifyEnabled !== undefined) {
+            const legacyEnabled = napcatNotifyEnabled ? 1 : 0;
+            updates.napcat_notify_enabled = legacyEnabled;
+            if (napcatNotifyMatureEnabled === undefined) updates.napcat_notify_mature_enabled = legacyEnabled;
+            if (napcatNotifyHelpEnabled === undefined) updates.napcat_notify_help_enabled = legacyEnabled;
+        }
+        if (napcatNotifyMatureEnabled !== undefined) updates.napcat_notify_mature_enabled = napcatNotifyMatureEnabled ? 1 : 0;
+        if (napcatNotifyHelpEnabled !== undefined) updates.napcat_notify_help_enabled = napcatNotifyHelpEnabled ? 1 : 0;
+        if (napcatBaseUrl !== undefined) updates.napcat_base_url = napcatBaseUrl;
+        if (napcatGroupId !== undefined) updates.napcat_group_id = napcatGroupId;
+        if (napcatAccessToken !== undefined) updates.napcat_access_token = napcatAccessToken;
         db.updateUser(uin, updates);
 
         // 如果 Bot 正在运行，更新运行时配置
@@ -316,8 +393,41 @@ class BotManager extends EventEmitter {
         if (bot) {
             if (farmInterval !== undefined) bot.farmInterval = farmInterval;
             if (friendInterval !== undefined) bot.friendInterval = friendInterval;
+            if (friendWhitelist !== undefined) bot.setFriendWhitelist(friendWhitelist);
             if (preferredSeedId !== undefined) bot.setPreferredSeedId(preferredSeedId);
+            if (
+                napcatNotifyEnabled !== undefined ||
+                napcatNotifyMatureEnabled !== undefined ||
+                napcatNotifyHelpEnabled !== undefined ||
+                napcatBaseUrl !== undefined ||
+                napcatGroupId !== undefined ||
+                napcatAccessToken !== undefined
+            ) {
+                bot.setNapcatNotifyConfig({
+                    friendMatureEnabled: napcatNotifyMatureEnabled !== undefined
+                        ? napcatNotifyMatureEnabled
+                        : napcatNotifyEnabled,
+                    friendHelpEnabled: napcatNotifyHelpEnabled !== undefined
+                        ? napcatNotifyHelpEnabled
+                        : napcatNotifyEnabled,
+                    baseUrl: napcatBaseUrl,
+                    groupId: napcatGroupId,
+                    accessToken: napcatAccessToken,
+                });
+            }
         }
+    }
+
+    updateAccountToggles(uin, toggles = {}) {
+        const safeToggles = toggles && typeof toggles === 'object' ? toggles : {};
+        db.updateUser(uin, { feature_toggles: JSON.stringify(safeToggles) });
+
+        const bot = this.bots.get(uin);
+        if (bot) {
+            bot.setFeatureToggles(safeToggles);
+            return bot.featureToggles;
+        }
+        return safeToggles;
     }
 
     // ============================================================
@@ -332,11 +442,19 @@ class BotManager extends EventEmitter {
             try {
                 const code = db.getSession(user.uin);
                 if (code) {
+                    const notifyFlags = resolveNapcatNotifyFlags(user);
                     await this._startBot(user.uin, code, {
                         platform: user.platform,
                         farmInterval: user.farm_interval,
                         friendInterval: user.friend_interval,
+                        friendWhitelist: user.friend_whitelist || '',
                         preferredSeedId: user.preferred_seed_id || 0,
+                        featureToggles: parseFeatureToggles(user.feature_toggles),
+                        napcatNotifyMatureEnabled: notifyFlags.matureEnabled,
+                        napcatNotifyHelpEnabled: notifyFlags.helpEnabled,
+                        napcatBaseUrl: user.napcat_base_url || '',
+                        napcatGroupId: user.napcat_group_id || '',
+                        napcatAccessToken: user.napcat_access_token || '',
                     });
                     console.log(`[BotManager] 已启动: ${user.uin} (${user.nickname || '未知'})`);
                 }

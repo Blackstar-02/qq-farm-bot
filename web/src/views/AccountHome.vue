@@ -82,6 +82,14 @@
             <el-switch v-model="toggles.friendVisit" @change="saveToggles" />
           </div>
           <div class="toggle-row">
+            <span class="toggle-label">好友作物成熟通知 <el-tooltip content="检测到好友有成熟作物时发送群通知" placement="top"><el-icon :size="14"><QuestionFilled /></el-icon></el-tooltip></span>
+            <el-switch v-model="napcatNotifyMatureEnabled" @change="saveNapcatMatureToggle" />
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-label">可帮助好友通知 <el-tooltip content="检测到好友可浇水/除草/除虫时发送群通知" placement="top"><el-icon :size="14"><QuestionFilled /></el-icon></el-tooltip></span>
+            <el-switch v-model="napcatNotifyHelpEnabled" @change="saveNapcatHelpToggle" />
+          </div>
+          <div class="toggle-row">
             <span class="toggle-label">自动偷菜 <el-tooltip content="偷取好友成熟作物" placement="top"><el-icon :size="14"><QuestionFilled /></el-icon></el-tooltip></span>
             <el-switch v-model="toggles.autoSteal" @change="saveToggles" />
           </div>
@@ -209,6 +217,42 @@
       </div>
     </div>
 
+    <div class="section-card">
+      <div class="section-header">
+        <h3 class="section-title">好友列表</h3>
+        <el-button size="small" @click="fetchFriends(false)" :loading="friendsLoading" :disabled="snapshot?.status !== 'running'">
+          刷新
+        </el-button>
+      </div>
+      <el-alert
+        v-if="snapshot?.status !== 'running'"
+        type="info"
+        :closable="false"
+        title="Bot 未运行，无法获取好友列表"
+        show-icon
+      />
+      <el-table v-else :data="friends" size="small" stripe v-loading="friendsLoading">
+        <el-table-column label="QQ号" min-width="140">
+          <template #default="{ row }">
+            {{ row.qq || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="name" label="昵称" min-width="140" />
+        <el-table-column label="备注" min-width="140">
+          <template #default="{ row }">
+            {{ row.remark || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="gid" label="GID" min-width="120" />
+        <el-table-column prop="level" label="等级" width="80" />
+        <el-table-column label="状态摘要" min-width="180">
+          <template #default="{ row }">
+            偷{{ row.stealNum || 0 }} / 水{{ row.dryNum || 0 }} / 草{{ row.weedNum || 0 }} / 虫{{ row.insectNum || 0 }}
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
     <div v-if="!snapshot && !loading" class="empty-state">
       <el-empty description="暂无数据，请先启动 Bot" />
     </div>
@@ -229,7 +273,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getAccountSnapshot, updateToggles, startBot, stopBot, startQrLogin, cancelQrLogin } from '../api/index.js'
+import { getAccountSnapshot, getAccountFriends, updateToggles, updateAccountConfig, startBot, stopBot, startQrLogin, cancelQrLogin } from '../api/index.js'
 import { onEvent, offEvent } from '../socket/index.js'
 import QrCodeDialog from '../components/QrCodeDialog.vue'
 
@@ -239,6 +283,10 @@ const loading = ref(false)
 const snapshot = ref(null)
 const toggles = ref(null)
 const stats = ref(null)
+const friends = ref([])
+const friendsLoading = ref(false)
+const napcatNotifyMatureEnabled = ref(false)
+const napcatNotifyHelpEnabled = ref(false)
 const uptime = ref(0)
 let uptimeTimer = null
 
@@ -253,6 +301,10 @@ async function fetchData() {
     const res = await getAccountSnapshot(props.uin)
     snapshot.value = res.data
     toggles.value = res.data.featureToggles ? { ...res.data.featureToggles } : null
+    const notify = res.data.napcatNotify || {}
+    const legacyEnabled = !!notify.enabled
+    napcatNotifyMatureEnabled.value = notify.matureEnabled ?? notify.friendMatureEnabled ?? legacyEnabled
+    napcatNotifyHelpEnabled.value = notify.helpEnabled ?? notify.friendHelpEnabled ?? legacyEnabled
     stats.value = res.data.dailyStats || null
     // 初始化挂机时长
     if (res.data.startedAt) {
@@ -261,9 +313,29 @@ async function fetchData() {
     } else {
       uptime.value = 0
       stopUptimeTimer()
+      friends.value = []
     }
   } catch { /* */ } finally {
     loading.value = false
+  }
+}
+
+async function fetchFriends(silent = false) {
+  if (!snapshot.value || snapshot.value.status !== 'running') {
+    friends.value = []
+    return
+  }
+  if (!silent) friendsLoading.value = true
+  try {
+    const res = await getAccountFriends(props.uin)
+    const list = Array.isArray(res.data) ? res.data : []
+    friends.value = list
+      .filter(f => Number(f?.level || 0) > 1)
+      .sort((a, b) => Number(b?.level || 0) - Number(a?.level || 0))
+  } catch (e) {
+    if (!silent) ElMessage.error('获取好友列表失败: ' + e.message)
+  } finally {
+    if (!silent) friendsLoading.value = false
   }
 }
 
@@ -284,6 +356,22 @@ function stopUptimeTimer() {
 async function saveToggles() {
   try {
     await updateToggles(props.uin, toggles.value)
+  } catch (e) {
+    ElMessage.error('保存失败: ' + e.message)
+  }
+}
+
+async function saveNapcatMatureToggle() {
+  try {
+    await updateAccountConfig(props.uin, { napcatNotifyMatureEnabled: napcatNotifyMatureEnabled.value })
+  } catch (e) {
+    ElMessage.error('保存失败: ' + e.message)
+  }
+}
+
+async function saveNapcatHelpToggle() {
+  try {
+    await updateAccountConfig(props.uin, { napcatNotifyHelpEnabled: napcatNotifyHelpEnabled.value })
   } catch (e) {
     ElMessage.error('保存失败: ' + e.message)
   }
@@ -354,7 +442,9 @@ function onStateUpdate(data) {
     } else if (data.status !== 'running') {
       uptime.value = 0
       stopUptimeTimer()
+      friends.value = []
     }
+    if (data.status === 'running') fetchFriends(true)
   }
 }
 
@@ -384,7 +474,7 @@ function onQrError(data) {
 }
 
 onMounted(() => {
-  fetchData()
+  fetchData().then(() => fetchFriends(true))
   onEvent('bot:stateUpdate', onStateUpdate)
   onEvent('qr:scanned', onQrScanned)
   onEvent('qr:expired', onQrExpired)

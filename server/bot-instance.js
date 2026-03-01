@@ -12,6 +12,7 @@ const EventEmitter = require('events');
 const WebSocket = require('ws');
 const protobuf = require('protobufjs');
 const Long = require('long');
+const axios = require('axios');
 const { types } = require('../src/proto');
 const { CONFIG, PlantPhase, PHASE_NAMES } = require('../src/config');
 const {
@@ -40,6 +41,15 @@ function nowStr() {
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function isFruitId(id) { return FRUIT_ID_SET.has(toNum(id)); }
+function normalizeFriendWhitelist(raw) {
+    if (raw === undefined || raw === null) return '';
+    return String(raw)
+        .split(/[\s,;|]+/)
+        .map(s => s.trim())
+        .filter(Boolean)
+        .filter(s => /^\d+$/.test(s))
+        .join(',');
+}
 
 // Tag 图标映射
 const TAG_ICONS = {
@@ -70,7 +80,25 @@ class BotInstance extends EventEmitter {
         this.platform = opts.platform || 'qq';
         this.farmInterval = opts.farmInterval || CONFIG.farmCheckInterval;
         this.friendInterval = opts.friendInterval || CONFIG.friendCheckInterval;
+        this.friendWhitelist = normalizeFriendWhitelist(opts.friendWhitelist || '');
+        this.friendWhitelistSet = new Set(
+            this.friendWhitelist
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean)
+        );
         this.preferredSeedId = opts.preferredSeedId || 0; // 0 = 自动选择
+        this.napcatNotify = {
+            friendMatureEnabled: opts.napcatNotifyMatureEnabled !== undefined
+                ? !!opts.napcatNotifyMatureEnabled
+                : !!opts.napcatNotifyEnabled,
+            friendHelpEnabled: opts.napcatNotifyHelpEnabled !== undefined
+                ? !!opts.napcatNotifyHelpEnabled
+                : !!opts.napcatNotifyEnabled,
+            baseUrl: (opts.napcatBaseUrl || '').trim(),
+            groupId: opts.napcatGroupId ? String(opts.napcatGroupId).trim() : '',
+            accessToken: (opts.napcatAccessToken || '').trim(),
+        };
 
         // ---------- 运行状态 ----------
         this.status = 'idle'; // idle | qr-pending | connecting | running | stopped | error
@@ -165,6 +193,10 @@ class BotInstance extends EventEmitter {
             autoFertilizerUse: false,   // 使用化肥礼包
         };
 
+        if (opts.featureToggles && typeof opts.featureToggles === 'object') {
+            Object.assign(this.featureToggles, opts.featureToggles);
+        }
+
         // ---------- 今日统计 ----------
         this.dailyStats = {
             date: new Date().toLocaleDateString(),
@@ -180,6 +212,8 @@ class BotInstance extends EventEmitter {
         // ---------- 缓存的土地数据 ----------
         this._cachedLands = null;
         this._cachedLandsTime = 0;
+        this._friendMatureNotifySeen = new Map();
+        this._friendCareNotifySeen = new Set();
     }
 
     // ================================================================
@@ -1205,7 +1239,12 @@ class BotInstance extends EventEmitter {
                         continue;
                     }
                     result.stealable.push(id);
-                    result.stealableInfo.push({ landId: id, plantId, name: getPlantName(plantId) || plant.name || '未知' });
+                    result.stealableInfo.push({
+                        landId: id,
+                        plantId,
+                        name: getPlantName(plantId) || plant.name || '未知',
+                        matureAt: this.toTimeSec(currentPhase.begin_time),
+                    });
                 }
                 continue;
             }
@@ -1229,6 +1268,8 @@ class BotInstance extends EventEmitter {
         const status = this.analyzeFriendLands(lands, this.userState.gid);
         const hasAnything = status.stealable.length + status.needWeed.length + status.needBug.length + status.needWater.length;
         if (hasAnything === 0) { await this.leaveFriendFarm(gid); return; }
+        await this.notifyFriendMatureIfNeeded(friend, status.stealableInfo || []);
+        await this.notifyFriendCareNeedsIfNeeded(friend, status);
         const actions = [];
         const skipped = [];
 
@@ -1315,9 +1356,14 @@ class BotInstance extends EventEmitter {
             const visitedGids = new Set();
 
             let skippedCount = 0;
+            let whitelistSkippedCount = 0;
             for (const f of friends) {
                 const gid = toNum(f.gid);
                 if (gid === this.userState.gid || visitedGids.has(gid)) continue;
+                if (this.friendWhitelistSet.size > 0 && !this.friendWhitelistSet.has(String(gid))) {
+                    whitelistSkippedCount++;
+                    continue;
+                }
                 const name = f.remark || f.name || `GID:${gid}`;
                 const p = f.plant;
                 const stealNum = p ? toNum(p.steal_plant_num) : 0;
@@ -1327,8 +1373,11 @@ class BotInstance extends EventEmitter {
                 // 根据开关决定是否有事可做
                 const canSteal = this.featureToggles.autoSteal && stealNum > 0;
                 const canHelp = this.featureToggles.friendHelp && (dryNum > 0 || weedNum > 0 || insectNum > 0);
-                // 有可偷 或 有可帮忙 → 访问
-                if (canSteal || canHelp) {
+                const canNotifyMature = this.napcatNotify.friendMatureEnabled && stealNum > 0;
+                const canNotifyHelp = this.napcatNotify.friendHelpEnabled && (dryNum > 0 || weedNum > 0 || insectNum > 0);
+                const canNotify = canNotifyMature || canNotifyHelp;
+                // 有可偷 / 可帮忙 / 仅通知需求 → 访问
+                if (canSteal || canHelp || canNotify) {
                     friendsToVisit.push({ gid, name, level: toNum(f.level), stealNum, dryNum, weedNum, insectNum });
                     visitedGids.add(gid);
                 } else {
@@ -1337,7 +1386,11 @@ class BotInstance extends EventEmitter {
             }
 
             if (friendsToVisit.length === 0) {
-                this.log('好友', `好友 ${friends.length} 人，全部无事可做`);
+                if (this.friendWhitelistSet.size > 0) {
+                    this.log('好友', `白名单模式：匹配${friends.length - whitelistSkippedCount}人，全部无事可做`);
+                } else {
+                    this.log('好友', `好友 ${friends.length} 人，全部无事可做`);
+                }
                 return;
             }
 
@@ -1350,7 +1403,13 @@ class BotInstance extends EventEmitter {
                 if (f.dryNum > 0) parts.push(`水${f.dryNum}`);
                 return `${f.name}(${parts.join('/')})`;
             }).join(', ');
-            this.log('好友', `待访问 ${friendsToVisit.length}/${friends.length} 人 (跳过${skippedCount}人): ${visitSummary}`);
+            const scopePart = this.friendWhitelistSet.size > 0
+                ? `白名单匹配${friends.length - whitelistSkippedCount}/${friends.length}人`
+                : `总计${friends.length}人`;
+            const skipPart = this.friendWhitelistSet.size > 0
+                ? `跳过${skippedCount}人, 白名单外${whitelistSkippedCount}人`
+                : `跳过${skippedCount}人`;
+            this.log('好友', `待访问 ${friendsToVisit.length}人 (${scopePart}, ${skipPart}): ${visitSummary}`);
 
             const totalActions = { steal: 0, water: 0, weed: 0, bug: 0 };
             for (const friend of friendsToVisit) {
@@ -2156,6 +2215,8 @@ class BotInstance extends EventEmitter {
      * 获取当前快照 (供 REST API 返回)
      */
     getSnapshot() {
+        const matureEnabled = !!this.napcatNotify.friendMatureEnabled;
+        const helpEnabled = !!this.napcatNotify.friendHelpEnabled;
         return {
             userId: this.userId,
             status: this.status,
@@ -2164,11 +2225,18 @@ class BotInstance extends EventEmitter {
             userState: { ...this.userState },
             farmInterval: this.farmInterval,
             friendInterval: this.friendInterval,
+            friendWhitelist: this.friendWhitelist,
             startedAt: this.startedAt,
             uptime: this.startedAt ? Date.now() - this.startedAt : 0,
             featureToggles: { ...this.featureToggles },
             dailyStats: { ...this.dailyStats },
             preferredSeedId: this.preferredSeedId,
+            napcatNotify: {
+                ...this.napcatNotify,
+                matureEnabled,
+                helpEnabled,
+                enabled: matureEnabled || helpEnabled,
+            },
         };
     }
 
@@ -2262,6 +2330,189 @@ class BotInstance extends EventEmitter {
         this.preferredSeedId = seedId || 0;
         const name = seedId ? (getPlantNameBySeedId(seedId) || seedId) : '自动选择';
         this.log('配置', `种植作物已设置: ${name}`);
+    }
+
+    setFriendWhitelist(raw) {
+        this.friendWhitelist = normalizeFriendWhitelist(raw);
+        this.friendWhitelistSet = new Set(
+            this.friendWhitelist
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean)
+        );
+        const mode = this.friendWhitelistSet.size > 0 ? `仅白名单(${this.friendWhitelistSet.size}人)` : '全部好友';
+        this.log('配置', `好友巡查范围已更新: ${mode}`);
+    }
+
+    setNapcatNotifyConfig(config = {}) {
+        if (config.enabled !== undefined) {
+            const enabled = !!config.enabled;
+            this.napcatNotify.friendMatureEnabled = enabled;
+            this.napcatNotify.friendHelpEnabled = enabled;
+        }
+        if (config.friendMatureEnabled !== undefined) {
+            this.napcatNotify.friendMatureEnabled = !!config.friendMatureEnabled;
+        }
+        if (config.friendHelpEnabled !== undefined) {
+            this.napcatNotify.friendHelpEnabled = !!config.friendHelpEnabled;
+        }
+        if (config.baseUrl !== undefined) {
+            this.napcatNotify.baseUrl = String(config.baseUrl || '').trim();
+        }
+        if (config.groupId !== undefined) {
+            this.napcatNotify.groupId = config.groupId ? String(config.groupId).trim() : '';
+        }
+        if (config.accessToken !== undefined) {
+            this.napcatNotify.accessToken = String(config.accessToken || '').trim();
+        }
+        this.log(
+            '配置',
+            `NapCat 通知配置已更新: mature=${this.napcatNotify.friendMatureEnabled}, help=${this.napcatNotify.friendHelpEnabled}, group=${this.napcatNotify.groupId || '-'}`
+        );
+    }
+
+    _buildNapcatApiUrl(pathname) {
+        const base = (this.napcatNotify.baseUrl || '').trim().replace(/\/+$/, '');
+        if (!base) return '';
+        if (/$/i.test(base)) return `${base}/${pathname}`;
+        return `${base}/api/${pathname}`;
+    }
+
+    _cleanupMatureNotifySeen() {
+        const now = Date.now();
+        const EXPIRE_MS = 6 * 60 * 60 * 1000;
+        for (const [key, ts] of this._friendMatureNotifySeen.entries()) {
+            if (now - ts > EXPIRE_MS) this._friendMatureNotifySeen.delete(key);
+        }
+    }
+
+    async notifyFriendMatureIfNeeded(friend, stealableInfo) {
+        if (!this.napcatNotify.friendMatureEnabled) return;
+        if (!this.napcatNotify.baseUrl || !this.napcatNotify.groupId) return;
+        if (!Array.isArray(stealableInfo) || stealableInfo.length === 0) return;
+
+        this._cleanupMatureNotifySeen();
+        const now = Date.now();
+        const newItems = [];
+        for (const item of stealableInfo) {
+            const matureAt = item.matureAt || 0;
+            const key = `${friend.gid}:${item.landId}:${item.plantId}:${matureAt}`;
+            if (!this._friendMatureNotifySeen.has(key)) {
+                this._friendMatureNotifySeen.set(key, now);
+                newItems.push(item);
+            }
+        }
+        if (newItems.length === 0) return;
+
+        const plantPart = newItems
+            .slice(0, 6)
+            .map(i => `${i.name}(#${i.landId})`)
+            .join('，');
+        const extra = newItems.length > 6 ? ` 等${newItems.length}块` : '';
+        const message = `【QQ农场】检测到好友菜成熟\n好友：${friend.name || friend.gid}\n成熟数：${newItems.length}\n作物：${plantPart}${extra}\n时间：${new Date().toLocaleString()}`;
+        const url = this._buildNapcatApiUrl('send_group_msg');
+        if (!url) return;
+        const groupIdNum = Number(this.napcatNotify.groupId);
+        if (!Number.isFinite(groupIdNum) || groupIdNum <= 0) {
+            this.logWarn('好友', `NapCat 群通知跳过: 群号无效(${this.napcatNotify.groupId || '-'})`);
+            return;
+        }
+
+        try {
+            const headers = {};
+            if (this.napcatNotify.accessToken) {
+                headers.Authorization = `Bearer ${this.napcatNotify.accessToken}`;
+            }
+            await axios.post(
+                url,
+                {
+                    group_id: groupIdNum,
+                    message,
+                },
+                {
+                    timeout: 8000,
+                    headers,
+                }
+            );
+            this.log('好友', `NapCat 群通知已发送: ${friend.name || friend.gid} 成熟${newItems.length}块`);
+        } catch (err) {
+            this.logWarn('好友', `NapCat 群通知失败: ${err.message}`);
+        }
+    }
+
+    async notifyFriendCareNeedsIfNeeded(friend, status) {
+        if (!this.napcatNotify.friendHelpEnabled) return;
+        if (!this.napcatNotify.baseUrl || !this.napcatNotify.groupId) return;
+        if (!status) return;
+
+        const water = Array.isArray(status.needWater) ? status.needWater : [];
+        const weed = Array.isArray(status.needWeed) ? status.needWeed : [];
+        const bug = Array.isArray(status.needBug) ? status.needBug : [];
+        const totalNeed = water.length + weed.length + bug.length;
+        if (totalNeed === 0) return;
+
+        const groupIdNum = Number(this.napcatNotify.groupId);
+        if (!Number.isFinite(groupIdNum) || groupIdNum <= 0) {
+            this.logWarn('好友', `NapCat 群通知跳过: 群号无效(${this.napcatNotify.groupId || '-'})`);
+            return;
+        }
+
+        // 仅通知“新出现”的待处理项；已恢复的项会从集合中剔除，后续再次出现可再次提醒
+        const currentKeys = new Set();
+        const newlyAdded = { water: [], weed: [], bug: [] };
+        const addKeys = (type, ids) => {
+            for (const id of ids) {
+                const key = `${friend.gid}:${type}:${id}`;
+                currentKeys.add(key);
+                if (!this._friendCareNotifySeen.has(key)) {
+                    this._friendCareNotifySeen.add(key);
+                    newlyAdded[type].push(id);
+                }
+            }
+        };
+        addKeys('water', water);
+        addKeys('weed', weed);
+        addKeys('bug', bug);
+
+        // 清理当前好友已恢复的项
+        const prefix = `${friend.gid}:`;
+        for (const key of Array.from(this._friendCareNotifySeen)) {
+            if (key.startsWith(prefix) && !currentKeys.has(key)) {
+                this._friendCareNotifySeen.delete(key);
+            }
+        }
+
+        const newlyTotal = newlyAdded.water.length + newlyAdded.weed.length + newlyAdded.bug.length;
+        if (newlyTotal === 0) return;
+
+        const parts = [];
+        if (newlyAdded.water.length > 0) parts.push(`浇水:${newlyAdded.water.length}[${newlyAdded.water.slice(0, 8).join(',')}]`);
+        if (newlyAdded.weed.length > 0) parts.push(`除草:${newlyAdded.weed.length}[${newlyAdded.weed.slice(0, 8).join(',')}]`);
+        if (newlyAdded.bug.length > 0) parts.push(`除虫:${newlyAdded.bug.length}[${newlyAdded.bug.slice(0, 8).join(',')}]`);
+        const message = `【QQ农场】检测到好友需要帮忙\n好友：${friend.name || friend.gid}\n新增待处理：${newlyTotal}\n${parts.join('\n')}\n时间：${new Date().toLocaleString()}`;
+        const url = this._buildNapcatApiUrl('send_group_msg');
+        if (!url) return;
+
+        try {
+            const headers = {};
+            if (this.napcatNotify.accessToken) {
+                headers.Authorization = `Bearer ${this.napcatNotify.accessToken}`;
+            }
+            await axios.post(
+                url,
+                {
+                    group_id: groupIdNum,
+                    message,
+                },
+                {
+                    timeout: 8000,
+                    headers,
+                }
+            );
+            this.log('好友', `NapCat 群通知已发送: ${friend.name || friend.gid} 需帮忙${newlyTotal}项`);
+        } catch (err) {
+            this.logWarn('好友', `NapCat 群通知失败: ${err.message}`);
+        }
     }
 
     /** 重置每日统计 (每日凌晨自动调用) */
