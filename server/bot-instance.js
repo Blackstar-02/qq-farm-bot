@@ -1185,6 +1185,30 @@ class BotInstance extends EventEmitter {
         return reply;
     }
 
+    // 给好友放虫（损人）
+    async putInsects(friendGid, landIds) {
+        const body = types.PutInsectsRequest.encode(types.PutInsectsRequest.create({
+            land_ids: landIds,
+            host_gid: toLong(friendGid),
+        })).finish();
+        const { body: replyBody } = await this.sendMsgAsync('gamepb.plantpb.PlantService', 'PutInsects', body);
+        const reply = types.PutInsectsReply.decode(replyBody);
+        if (reply.operation_limits) this._updateOperationLimits(reply.operation_limits);
+        return reply;
+    }
+
+    // 给好友放草（损人）
+    async putWeeds(friendGid, landIds) {
+        const body = types.PutWeedsRequest.encode(types.PutWeedsRequest.create({
+            land_ids: landIds,
+            host_gid: toLong(friendGid),
+        })).finish();
+        const { body: replyBody } = await this.sendMsgAsync('gamepb.plantpb.PlantService', 'PutWeeds', body);
+        const reply = types.PutWeedsReply.decode(replyBody);
+        if (reply.operation_limits) this._updateOperationLimits(reply.operation_limits);
+        return reply;
+    }
+
     async stealHarvest(friendGid, landIds) {
         const body = types.HarvestRequest.encode(types.HarvestRequest.create({
             land_ids: landIds, host_gid: toLong(friendGid), is_all: true,
@@ -1262,7 +1286,7 @@ class BotInstance extends EventEmitter {
         // 白萝卜植物ID列表
         const RADISH_PLANT_IDS = [2020002, 1020002];
         
-        const result = { stealable: [], stealableInfo: [], needWater: [], needWeed: [], needBug: [] };
+        const result = { stealable: [], stealableInfo: [], needWater: [], needWeed: [], needBug: [], cleanLands: [] };
         for (const land of lands) {
             const id = toNum(land.id);
             const plant = land.plant;
@@ -1288,9 +1312,16 @@ class BotInstance extends EventEmitter {
                 continue;
             }
             if (phaseVal === PlantPhase.DEAD) continue;
+            // 记录需要浇水/除草/除虫的地
             if (toNum(plant.dry_num) > 0) result.needWater.push(id);
             if (plant.weed_owners && plant.weed_owners.length > 0) result.needWeed.push(id);
             if (plant.insect_owners && plant.insect_owners.length > 0) result.needBug.push(id);
+            // 记录干净的地（可以放虫放草）
+            const hasWeed = plant.weed_owners && plant.weed_owners.length > 0;
+            const hasBug = plant.insect_owners && plant.insect_owners.length > 0;
+            if (!hasWeed && !hasBug) {
+                result.cleanLands.push(id);
+            }
         }
         return result;
     }
@@ -1376,6 +1407,41 @@ class BotInstance extends EventEmitter {
             }
         }
 
+        // 给好友放虫放草（损人）
+        if (this.featureToggles.friendPest && status.cleanLands.length > 0) {
+            // 放虫: 操作ID 10009, 放草: 操作ID 10008
+            const canPutBug = this._canOperate(10009);
+            const canPutWeed = this._canOperate(10008);
+            
+            if (canPutBug || canPutWeed) {
+                const landsToPest = status.cleanLands.slice(0, 3);
+                const bugLands = [];
+                const weedLands = [];
+                
+                for (const landId of landsToPest) {
+                    if (canPutBug && Math.random() > 0.3) {
+                        bugLands.push(landId);
+                    } else if (canPutWeed) {
+                        weedLands.push(landId);
+                    }
+                }
+                
+                if (bugLands.length > 0) {
+                    try {
+                        await this.putInsects(gid, bugLands);
+                        actions.push(`🐛放虫×${bugLands.length}`);
+                    } catch (e) { this.logWarn('好友', `放虫失败: ${e.message}`); }
+                }
+                if (weedLands.length > 0) {
+                    try {
+                        await this.putWeeds(gid, weedLands);
+                        actions.push(`🌿放草×${weedLands.length}`);
+                    } catch (e) { this.logWarn('好友', `放草失败: ${e.message}`); }
+                }
+                await sleep(100);
+            }
+        }
+
         const allParts = [...actions];
         if (skipped.length > 0) allParts.push(`⚠️跳过: ${skipped.join(' / ')}`);
         if (allParts.length > 0) this.log('好友', `访问 ${name}: ${allParts.join(' | ')}`);
@@ -1418,8 +1484,10 @@ class BotInstance extends EventEmitter {
                 const canNotifyMature = hasNotifyTarget && friendPerm.allowNotifySteal && stealNum > 0;
                 const canNotifyHelp = hasNotifyTarget && friendPerm.allowNotifyHelp && (dryNum > 0 || weedNum > 0 || insectNum > 0);
                 const canNotify = canNotifyMature || canNotifyHelp;
-                // 有可偷 / 可帮忙 / 仅通知需求 → 访问
-                if (canSteal || canHelp || canNotify) {
+                // 放虫放草：好友没有虫/草时可以放
+                const canPest = this.featureToggles.friendPest && weedNum === 0 && insectNum === 0 && (this._canOperate(10008) || this._canOperate(10009));
+                // 有可偷 / 可帮忙 / 仅通知需求 / 可放虫放草 → 访问
+                if (canSteal || canHelp || canNotify || canPest) {
                     friendsToVisit.push({ gid, name, level: toNum(f.level), stealNum, dryNum, weedNum, insectNum });
                     visitedGids.add(gid);
                 } else {
@@ -1547,8 +1615,36 @@ class BotInstance extends EventEmitter {
         }
     }
 
+    // 任务检查循环（定期检查可领取的任务）
+    taskCheckRunning = false;
+    taskCheckTimer = null;
+
+    async taskCheckLoop() {
+        while (this.taskCheckRunning) {
+            await this.checkAndClaimTasks();
+            if (!this.taskCheckRunning) break;
+            // 每5分钟检查一次任务
+            await sleep(5 * 60 * 1000);
+        }
+    }
+
+    startTaskCheckLoop() {
+        if (this.taskCheckRunning) return;
+        this.taskCheckRunning = true;
+        setTimeout(() => this.taskCheckLoop(), 5000);
+    }
+
+    stopTaskCheckLoop() {
+        this.taskCheckRunning = false;
+        if (this.taskCheckTimer) {
+            clearTimeout(this.taskCheckTimer);
+            this.taskCheckTimer = null;
+        }
+    }
+
     _initTaskSystem() {
-        setTimeout(() => this.checkAndClaimTasks(), 4000);
+        // 启动任务检查循环
+        this.startTaskCheckLoop();
         // 启动每日奖励系统
         this._initDailyRewardSystem();
     }
@@ -2218,6 +2314,7 @@ class BotInstance extends EventEmitter {
         this.log('系统', '⏸️ Bot 正在停止...');
         this.farmLoopRunning = false;
         this.friendLoopRunning = false;
+        this.stopTaskCheckLoop();
         if (this.farmCheckTimer) { clearTimeout(this.farmCheckTimer); this.farmCheckTimer = null; }
         if (this.friendCheckTimer) { clearTimeout(this.friendCheckTimer); this.friendCheckTimer = null; }
         this._cleanup();

@@ -181,6 +181,9 @@ async function initDatabase() {
     try { db.run(`ALTER TABLE users ADD COLUMN feature_toggles TEXT DEFAULT ''`); } catch (e) { /* 列已存在 */ }
     try { db.run(`ALTER TABLE users ADD COLUMN daily_stats TEXT DEFAULT ''`); } catch (e) { /* 列已存在 */ }
 
+    // 迁移: 添加 feature_toggles 列
+    try { db.run(`ALTER TABLE users ADD COLUMN feature_toggles TEXT DEFAULT ''`); } catch (e) { /* 列已存在 */ }
+
     saveToFile();
 
     // 自动保存定时器
