@@ -108,7 +108,9 @@ async function initDatabase() {
             platform TEXT DEFAULT 'qq',
             farm_interval INTEGER DEFAULT 10000,
             friend_interval INTEGER DEFAULT 10000,
+            friend_notify_cooldown_sec INTEGER DEFAULT 60,
             friend_whitelist TEXT DEFAULT '',
+            friend_action_config TEXT DEFAULT '',
             napcat_notify_enabled INTEGER DEFAULT 0,
             napcat_notify_mature_enabled INTEGER DEFAULT 0,
             napcat_notify_help_enabled INTEGER DEFAULT 0,
@@ -116,6 +118,7 @@ async function initDatabase() {
             napcat_group_id TEXT DEFAULT '',
             napcat_access_token TEXT DEFAULT '',
             feature_toggles TEXT DEFAULT '',
+            daily_stats TEXT DEFAULT '',
             auto_start INTEGER DEFAULT 0,
             last_login_at TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime')),
@@ -167,6 +170,8 @@ async function initDatabase() {
     // 迁移: 添加 preferred_seed_id 列
     try { db.run(`ALTER TABLE users ADD COLUMN preferred_seed_id INTEGER DEFAULT 0`); } catch (e) { /* 列已存在 */ }
     try { db.run(`ALTER TABLE users ADD COLUMN friend_whitelist TEXT DEFAULT ''`); } catch (e) { /* 列已存在 */ }
+    try { db.run(`ALTER TABLE users ADD COLUMN friend_notify_cooldown_sec INTEGER DEFAULT 60`); } catch (e) { /* 列已存在 */ }
+    try { db.run(`ALTER TABLE users ADD COLUMN friend_action_config TEXT DEFAULT ''`); } catch (e) { /* 列已存在 */ }
     try { db.run(`ALTER TABLE users ADD COLUMN napcat_notify_enabled INTEGER DEFAULT 0`); } catch (e) { /* 列已存在 */ }
     try { db.run(`ALTER TABLE users ADD COLUMN napcat_notify_mature_enabled INTEGER DEFAULT 0`); } catch (e) { /* 列已存在 */ }
     try { db.run(`ALTER TABLE users ADD COLUMN napcat_notify_help_enabled INTEGER DEFAULT 0`); } catch (e) { /* 列已存在 */ }
@@ -174,6 +179,7 @@ async function initDatabase() {
     try { db.run(`ALTER TABLE users ADD COLUMN napcat_group_id TEXT DEFAULT ''`); } catch (e) { /* 列已存在 */ }
     try { db.run(`ALTER TABLE users ADD COLUMN napcat_access_token TEXT DEFAULT ''`); } catch (e) { /* 列已存在 */ }
     try { db.run(`ALTER TABLE users ADD COLUMN feature_toggles TEXT DEFAULT ''`); } catch (e) { /* 列已存在 */ }
+    try { db.run(`ALTER TABLE users ADD COLUMN daily_stats TEXT DEFAULT ''`); } catch (e) { /* 列已存在 */ }
 
     saveToFile();
 

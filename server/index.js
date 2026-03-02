@@ -23,7 +23,7 @@ const { botManager } = require('./bot-manager');
 // ---------- 路由 ----------
 const apiRoutes = require('./routes');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 async function main() {
     // 1. 加载 Proto 定义 (所有 Bot 实例共享)

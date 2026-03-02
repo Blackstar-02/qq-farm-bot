@@ -9,6 +9,28 @@ const db = require('./database');
 const { signToken, hashPassword, authMiddleware, adminOnly, canAccessUin } = require('./auth');
 const gameConfig = require('../src/gameConfig');
 
+function parseFriendActionConfig(raw) {
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function parseDailyStats(raw) {
+    if (!raw) return null;
+    if (typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
 // ============================================================
 //  认证 (不需要 token)
 // ============================================================
@@ -260,11 +282,18 @@ router.get('/accounts/:uin/friends', canAccessUin, async (req, res) => {
         }
         const reply = await bot.getAllFriends();
         const friends = Array.isArray(reply?.game_friends) ? reply.game_friends : [];
+        const user = db.getUserByUin(req.params.uin);
+        const friendActionConfig = parseFriendActionConfig(user?.friend_action_config);
         const data = friends.map((f) => {
             const openId = String(f.open_id || '').trim();
             const qq = /^\d+$/.test(openId) ? openId : '';
+            const gid = Number(f.gid || 0);
+            const cfg = friendActionConfig[String(gid)] && typeof friendActionConfig[String(gid)] === 'object'
+                ? friendActionConfig[String(gid)]
+                : {};
+            const legacyNotify = cfg.allowNotify === true;
             return {
-                gid: Number(f.gid || 0),
+                gid,
                 qq,
                 openId,
                 name: f.name || '',
@@ -274,6 +303,10 @@ router.get('/accounts/:uin/friends', canAccessUin, async (req, res) => {
                 dryNum: Number(f?.plant?.dry_num || 0),
                 weedNum: Number(f?.plant?.weed_num || 0),
                 insectNum: Number(f?.plant?.insect_num || 0),
+                allowSteal: cfg.allowSteal === true,
+                allowHelp: cfg.allowHelp === true,
+                allowNotifySteal: cfg.allowNotifySteal !== undefined ? cfg.allowNotifySteal === true : legacyNotify,
+                allowNotifyHelp: cfg.allowNotifyHelp !== undefined ? cfg.allowNotifyHelp === true : legacyNotify,
             };
         });
         res.json({ ok: true, data });
@@ -298,7 +331,12 @@ router.get('/accounts/:uin/snapshot', canAccessUin, (req, res) => {
                     userState: { name: user.nickname, level: user.level, gold: user.gold, exp: user.exp, gid: user.gid },
                     farmInterval: user.farm_interval || 10000,
                     friendInterval: user.friend_interval || 10000,
-                    featureToggles, dailyStats: null,
+                    friendNotifyCooldownSec: Number.isFinite(Number(user.friend_notify_cooldown_sec))
+                        ? Number(user.friend_notify_cooldown_sec)
+                        : 60,
+                    friendActionConfig: parseFriendActionConfig(user.friend_action_config),
+                    featureToggles,
+                    dailyStats: parseDailyStats(user.daily_stats),
                     preferredSeedId: user.preferred_seed_id || 0,
                     napcatNotify: {
                         matureEnabled: user.napcat_notify_mature_enabled !== undefined && user.napcat_notify_mature_enabled !== null
@@ -335,6 +373,23 @@ router.put('/accounts/:uin/toggles', canAccessUin, (req, res) => {
         res.json({ ok: true, data: toggles });
     } catch (err) {
         res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+/** PUT /api/accounts/:uin/friends/:gid/config - 更新单个好友行为开关 */
+router.put('/accounts/:uin/friends/:gid/config', canAccessUin, (req, res) => {
+    try {
+        const { allowSteal, allowHelp, allowNotify, allowNotifySteal, allowNotifyHelp } = req.body || {};
+        const data = botManager.updateAccountFriendConfig(req.params.uin, req.params.gid, {
+            allowSteal,
+            allowHelp,
+            allowNotify,
+            allowNotifySteal,
+            allowNotifyHelp,
+        });
+        res.json({ ok: true, data });
+    } catch (err) {
+        res.status(400).json({ ok: false, error: err.message });
     }
 });
 

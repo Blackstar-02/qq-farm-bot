@@ -82,24 +82,8 @@
             <el-switch v-model="toggles.friendVisit" @change="saveToggles" />
           </div>
           <div class="toggle-row">
-            <span class="toggle-label">好友作物成熟通知 <el-tooltip content="检测到好友有成熟作物时发送群通知" placement="top"><el-icon :size="14"><QuestionFilled /></el-icon></el-tooltip></span>
-            <el-switch v-model="napcatNotifyMatureEnabled" @change="saveNapcatMatureToggle" />
-          </div>
-          <div class="toggle-row">
-            <span class="toggle-label">可帮助好友通知 <el-tooltip content="检测到好友可浇水/除草/除虫时发送群通知" placement="top"><el-icon :size="14"><QuestionFilled /></el-icon></el-tooltip></span>
-            <el-switch v-model="napcatNotifyHelpEnabled" @change="saveNapcatHelpToggle" />
-          </div>
-          <div class="toggle-row">
-            <span class="toggle-label">自动偷菜 <el-tooltip content="偷取好友成熟作物" placement="top"><el-icon :size="14"><QuestionFilled /></el-icon></el-tooltip></span>
-            <el-switch v-model="toggles.autoSteal" @change="saveToggles" />
-          </div>
-          <div class="toggle-row">
             <span class="toggle-label">不偷白萝卜 <el-tooltip content="开启后偷菜时跳过白萝卜" placement="top"><el-icon :size="14"><QuestionFilled /></el-icon></el-tooltip></span>
             <el-switch v-model="toggles.skipStealRadish" @change="saveToggles" />
-          </div>
-          <div class="toggle-row">
-            <span class="toggle-label">帮忙操作 <el-tooltip content="帮好友浇水除草" placement="top"><el-icon :size="14"><QuestionFilled /></el-icon></el-tooltip></span>
-            <el-switch v-model="toggles.friendHelp" @change="saveToggles" />
           </div>
           <div class="toggle-row">
             <span class="toggle-label">放虫放草 <el-tooltip content="给好友放置害虫和杂草" placement="top"><el-icon :size="14"><QuestionFilled /></el-icon></el-tooltip></span>
@@ -231,23 +215,71 @@
         title="Bot 未运行，无法获取好友列表"
         show-icon
       />
-      <el-table v-else :data="friends" size="small" stripe v-loading="friendsLoading">
-        <el-table-column label="QQ号" min-width="140">
+      <el-table
+        v-else
+        :data="friends"
+        size="small"
+        stripe
+        class="friend-table"
+        v-loading="friendsLoading"
+        :header-cell-style="{ background: 'var(--bg-base)', color: 'var(--text-muted)', borderColor: 'var(--border)' }"
+        :cell-style="{ background: 'var(--bg-surface)', color: 'var(--text-secondary)', borderColor: 'var(--border)' }"
+      >
+        <el-table-column label="昵称" min-width="140">
           <template #default="{ row }">
-            {{ row.qq || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="name" label="昵称" min-width="140" />
-        <el-table-column label="备注" min-width="140">
-          <template #default="{ row }">
-            {{ row.remark || '-' }}
+            <span class="friend-name">{{ row.name || '-' }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="gid" label="GID" min-width="120" />
-        <el-table-column prop="level" label="等级" width="80" />
+        <el-table-column label="等级" width="90" align="center">
+          <template #default="{ row }">
+            <span class="friend-level">Lv{{ row.level || 0 }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="状态摘要" min-width="180">
           <template #default="{ row }">
-            偷{{ row.stealNum || 0 }} / 水{{ row.dryNum || 0 }} / 草{{ row.weedNum || 0 }} / 虫{{ row.insectNum || 0 }}
+            <div class="friend-summary">
+              <span class="sum-chip steal">偷 {{ row.stealNum || 0 }}</span>
+              <span class="sum-chip water">水 {{ row.dryNum || 0 }}</span>
+              <span class="sum-chip weed">草 {{ row.weedNum || 0 }}</span>
+              <span class="sum-chip bug">虫 {{ row.insectNum || 0 }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="允许偷菜" width="92" align="center">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.allowSteal"
+              :loading="isFriendSaving(row.gid, 'allowSteal')"
+              @change="(v) => updateFriendPermission(row, 'allowSteal', v)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="允许帮助" width="92" align="center">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.allowHelp"
+              :loading="isFriendSaving(row.gid, 'allowHelp')"
+              @change="(v) => updateFriendPermission(row, 'allowHelp', v)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="偷菜通知" width="92" align="center">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.allowNotifySteal"
+              :loading="isFriendSaving(row.gid, 'allowNotifySteal')"
+              @change="(v) => updateFriendPermission(row, 'allowNotifySteal', v)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="帮助通知" width="92" align="center">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.allowNotifyHelp"
+              :loading="isFriendSaving(row.gid, 'allowNotifyHelp')"
+              @change="(v) => updateFriendPermission(row, 'allowNotifyHelp', v)"
+            />
           </template>
         </el-table-column>
       </el-table>
@@ -273,7 +305,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getAccountSnapshot, getAccountFriends, updateToggles, updateAccountConfig, startBot, stopBot, startQrLogin, cancelQrLogin } from '../api/index.js'
+import { getAccountSnapshot, getAccountFriends, updateAccountFriendConfig, updateToggles, stopBot, startQrLogin, cancelQrLogin } from '../api/index.js'
 import { onEvent, offEvent } from '../socket/index.js'
 import QrCodeDialog from '../components/QrCodeDialog.vue'
 
@@ -285,8 +317,7 @@ const toggles = ref(null)
 const stats = ref(null)
 const friends = ref([])
 const friendsLoading = ref(false)
-const napcatNotifyMatureEnabled = ref(false)
-const napcatNotifyHelpEnabled = ref(false)
+const friendSavingKeys = ref(new Set())
 const uptime = ref(0)
 let uptimeTimer = null
 
@@ -301,10 +332,6 @@ async function fetchData() {
     const res = await getAccountSnapshot(props.uin)
     snapshot.value = res.data
     toggles.value = res.data.featureToggles ? { ...res.data.featureToggles } : null
-    const notify = res.data.napcatNotify || {}
-    const legacyEnabled = !!notify.enabled
-    napcatNotifyMatureEnabled.value = notify.matureEnabled ?? notify.friendMatureEnabled ?? legacyEnabled
-    napcatNotifyHelpEnabled.value = notify.helpEnabled ?? notify.friendHelpEnabled ?? legacyEnabled
     stats.value = res.data.dailyStats || null
     // 初始化挂机时长
     if (res.data.startedAt) {
@@ -331,7 +358,11 @@ async function fetchFriends(silent = false) {
     const list = Array.isArray(res.data) ? res.data : []
     friends.value = list
       .filter(f => Number(f?.level || 0) > 1)
-      .sort((a, b) => Number(b?.level || 0) - Number(a?.level || 0))
+      .sort((a, b) => {
+        const levelDiff = Number(b?.level || 0) - Number(a?.level || 0)
+        if (levelDiff !== 0) return levelDiff
+        return Number(a?.gid || 0) - Number(b?.gid || 0)
+      })
   } catch (e) {
     if (!silent) ElMessage.error('获取好友列表失败: ' + e.message)
   } finally {
@@ -361,19 +392,36 @@ async function saveToggles() {
   }
 }
 
-async function saveNapcatMatureToggle() {
-  try {
-    await updateAccountConfig(props.uin, { napcatNotifyMatureEnabled: napcatNotifyMatureEnabled.value })
-  } catch (e) {
-    ElMessage.error('保存失败: ' + e.message)
-  }
+function getFriendSavingKey(gid, field) {
+  return `${gid}:${field}`
 }
 
-async function saveNapcatHelpToggle() {
+function isFriendSaving(gid, field) {
+  return friendSavingKeys.value.has(getFriendSavingKey(gid, field))
+}
+
+async function updateFriendPermission(row, field, value) {
+  const key = getFriendSavingKey(row.gid, field)
+  const prev = row[field]
+  row[field] = !!value
+  const nextKeys = new Set(friendSavingKeys.value)
+  nextKeys.add(key)
+  friendSavingKeys.value = nextKeys
   try {
-    await updateAccountConfig(props.uin, { napcatNotifyHelpEnabled: napcatNotifyHelpEnabled.value })
+    const payload = {
+      allowSteal: row.allowSteal,
+      allowHelp: row.allowHelp,
+      allowNotifySteal: row.allowNotifySteal,
+      allowNotifyHelp: row.allowNotifyHelp,
+    }
+    await updateAccountFriendConfig(props.uin, row.gid, payload)
   } catch (e) {
+    row[field] = prev
     ElMessage.error('保存失败: ' + e.message)
+  } finally {
+    const keys = new Set(friendSavingKeys.value)
+    keys.delete(key)
+    friendSavingKeys.value = keys
   }
 }
 
@@ -605,6 +653,53 @@ onUnmounted(() => {
 .section-date {
   color: var(--text-muted);
   font-size: 13px;
+}
+
+/* 好友表格 */
+.friend-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.friend-level {
+  color: var(--color-warning);
+  font-weight: 700;
+}
+
+.friend-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sum-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  background: var(--bg-base);
+}
+
+.sum-chip.steal { color: #7bd88f; border-color: rgba(123, 216, 143, 0.45); }
+.sum-chip.water { color: #7dbdff; border-color: rgba(125, 189, 255, 0.45); }
+.sum-chip.weed { color: #9ddb7a; border-color: rgba(157, 219, 122, 0.45); }
+.sum-chip.bug { color: #ffbf69; border-color: rgba(255, 191, 105, 0.45); }
+
+:deep(.friend-table) {
+  border-radius: 10px;
+  overflow: hidden;
+  --el-table-row-hover-bg-color: var(--bg-hover);
+}
+
+:deep(.friend-table .el-table__header-wrapper th.el-table__cell) {
+  font-weight: 600;
+}
+
+:deep(.friend-table .el-switch) {
+  --el-switch-on-color: var(--color-success);
 }
 
 /* 功能开关 */

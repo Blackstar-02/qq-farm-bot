@@ -12,15 +12,9 @@
           <el-input-number v-model="friendIntervalSec" :min="1" :max="3600" :step="1" />
           <span class="unit">秒 (最低1秒)</span>
         </el-form-item>
-        <el-form-item label="好友巡查白名单">
-          <el-input
-            v-model="friendWhitelist"
-            type="textarea"
-            :rows="3"
-            placeholder="填写好友 GID，支持逗号/空格/换行分隔；留空表示巡查全部好友"
-            style="width: 420px"
-          />
-          <span class="unit">仅巡查白名单好友</span>
+        <el-form-item label="通知冷却间隔">
+          <el-input-number v-model="friendNotifyCooldownSec" :min="0" :max="86400" :step="1" />
+          <span class="unit">秒 (同好友同类型通知，0=不限制)</span>
         </el-form-item>
         <el-form-item label="指定种植作物">
           <el-select
@@ -123,7 +117,7 @@ const props = defineProps({ uin: String })
 
 const farmIntervalSec = ref(1)
 const friendIntervalSec = ref(10)
-const friendWhitelist = ref('')
+const friendNotifyCooldownSec = ref(60)
 const preferredSeedId = ref(29999)  // 29999 = 白萝卜仙人
 
 const napcatBaseUrl = ref('')
@@ -143,7 +137,9 @@ async function fetchConfig() {
     const data = res.data
     farmIntervalSec.value = Math.round((data.farmInterval || 1000) / 1000)
     friendIntervalSec.value = Math.round((data.friendInterval || 10000) / 1000)
-    friendWhitelist.value = data.friendWhitelist || ''
+    friendNotifyCooldownSec.value = Number.isFinite(Number(data.friendNotifyCooldownSec))
+      ? Number(data.friendNotifyCooldownSec)
+      : 60
     userLevel.value = data.userState?.level || 1
     // 显式判断，保留 0 表示自动选择
     preferredSeedId.value = data.preferredSeedId ?? 0
@@ -159,7 +155,7 @@ async function saveConfig() {
     await updateAccountConfig(props.uin, {
       farmInterval: farmIntervalSec.value * 1000,
       friendInterval: friendIntervalSec.value * 1000,
-      friendWhitelist: friendWhitelist.value,
+      friendNotifyCooldownSec: friendNotifyCooldownSec.value,
       preferredSeedId: preferredSeedId.value || 0,
       napcatBaseUrl: napcatBaseUrl.value.trim(),
       napcatGroupId: napcatGroupId.value.trim(),

@@ -68,6 +68,10 @@ export function getAccountFriends(uin) {
   return api.get(`/accounts/${uin}/friends`)
 }
 
+export function updateAccountFriendConfig(uin, gid, config) {
+  return api.put(`/accounts/${uin}/friends/${gid}/config`, config)
+}
+
 export function getAccountLogs(uin, limit = 500) {
   return api.get(`/accounts/${uin}/logs`, { params: { limit } })
 }

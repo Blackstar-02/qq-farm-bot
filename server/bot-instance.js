@@ -51,6 +51,27 @@ function normalizeFriendWhitelist(raw) {
         .join(',');
 }
 
+function normalizeFriendActionConfig(raw) {
+    if (!raw || typeof raw !== 'object') return {};
+    const out = {};
+    for (const [gid, cfg] of Object.entries(raw)) {
+        if (!/^\d+$/.test(String(gid))) continue;
+        const item = cfg && typeof cfg === 'object' ? cfg : {};
+        const legacyNotify = item.allowNotify === true;
+        out[String(gid)] = {
+            allowSteal: item.allowSteal === true,
+            allowHelp: item.allowHelp === true,
+            allowNotifySteal: item.allowNotifySteal !== undefined ? item.allowNotifySteal === true : legacyNotify,
+            allowNotifyHelp: item.allowNotifyHelp !== undefined ? item.allowNotifyHelp === true : legacyNotify,
+        };
+    }
+    return out;
+}
+
+function getTodayDateStr() {
+    return new Date().toLocaleDateString();
+}
+
 // Tag 图标映射
 const TAG_ICONS = {
     '系统': '⚙️', 'WS': '🔌', '登录': '🔑', '心跳': '💬',
@@ -80,6 +101,7 @@ class BotInstance extends EventEmitter {
         this.platform = opts.platform || 'qq';
         this.farmInterval = opts.farmInterval || CONFIG.farmCheckInterval;
         this.friendInterval = opts.friendInterval || CONFIG.friendCheckInterval;
+        this.friendNotifyCooldownSec = Math.max(0, Math.min(86400, Math.trunc(Number(opts.friendNotifyCooldownSec ?? 60) || 0)));
         this.friendWhitelist = normalizeFriendWhitelist(opts.friendWhitelist || '');
         this.friendWhitelistSet = new Set(
             this.friendWhitelist
@@ -87,6 +109,7 @@ class BotInstance extends EventEmitter {
                 .map(s => s.trim())
                 .filter(Boolean)
         );
+        this.friendActionConfig = normalizeFriendActionConfig(opts.friendActionConfig);
         this.preferredSeedId = opts.preferredSeedId || 0; // 0 = 自动选择
         this.napcatNotify = {
             friendMatureEnabled: opts.napcatNotifyMatureEnabled !== undefined
@@ -198,22 +221,38 @@ class BotInstance extends EventEmitter {
         }
 
         // ---------- 今日统计 ----------
-        this.dailyStats = {
-            date: new Date().toLocaleDateString(),
-            expGained: 0,
-            harvestCount: 0,
-            stealCount: 0,
-            helpWater: 0,
-            helpWeed: 0,
-            helpPest: 0,
-            sellGold: 0,
-        };
+        const today = getTodayDateStr();
+        const incomingStats = opts.dailyStats && typeof opts.dailyStats === 'object' ? opts.dailyStats : null;
+        if (incomingStats && incomingStats.date === today) {
+            this.dailyStats = {
+                date: today,
+                expGained: toNum(incomingStats.expGained),
+                harvestCount: toNum(incomingStats.harvestCount),
+                stealCount: toNum(incomingStats.stealCount),
+                helpWater: toNum(incomingStats.helpWater),
+                helpWeed: toNum(incomingStats.helpWeed),
+                helpPest: toNum(incomingStats.helpPest),
+                sellGold: toNum(incomingStats.sellGold),
+            };
+        } else {
+            this.dailyStats = {
+                date: today,
+                expGained: 0,
+                harvestCount: 0,
+                stealCount: 0,
+                helpWater: 0,
+                helpWeed: 0,
+                helpPest: 0,
+                sellGold: 0,
+            };
+        }
 
         // ---------- 缓存的土地数据 ----------
         this._cachedLands = null;
         this._cachedLandsTime = 0;
         this._friendMatureNotifySeen = new Map();
         this._friendCareNotifySeen = new Set();
+        this._friendTypeNotifyAt = new Map();
     }
 
     // ================================================================
@@ -1258,6 +1297,7 @@ class BotInstance extends EventEmitter {
 
     async visitFriend(friend, totalActions) {
         const { gid, name } = friend;
+        const friendPerm = this.getFriendActionPermission(gid);
         let enterReply;
         try { enterReply = await this.enterFriendFarm(gid); }
         catch (e) { this.logWarn('好友', `进入 ${name} 农场失败: ${e.message}`); return; }
@@ -1274,7 +1314,7 @@ class BotInstance extends EventEmitter {
         const skipped = [];
 
         // 帮除草
-        if (status.needWeed.length > 0 && this.featureToggles.friendHelp) {
+        if (status.needWeed.length > 0 && friendPerm.allowHelp) {
             if (this.featureToggles.helpEvenExpFull || this._canGetExp(10005)) {
                 this._markExpCheck(10005);
                 let ok = 0;
@@ -1288,7 +1328,7 @@ class BotInstance extends EventEmitter {
             }
         }
         // 帮除虫
-        if (status.needBug.length > 0 && this.featureToggles.friendHelp) {
+        if (status.needBug.length > 0 && friendPerm.allowHelp) {
             if (this.featureToggles.helpEvenExpFull || this._canGetExp(10006)) {
                 this._markExpCheck(10006);
                 let ok = 0;
@@ -1302,7 +1342,7 @@ class BotInstance extends EventEmitter {
             }
         }
         // 帮浇水
-        if (status.needWater.length > 0 && this.featureToggles.friendHelp) {
+        if (status.needWater.length > 0 && friendPerm.allowHelp) {
             if (this.featureToggles.helpEvenExpFull || this._canGetExp(10007)) {
                 this._markExpCheck(10007);
                 let ok = 0;
@@ -1316,7 +1356,7 @@ class BotInstance extends EventEmitter {
             }
         }
         // 偷菜
-        if (status.stealable.length > 0 && this.featureToggles.autoSteal) {
+        if (status.stealable.length > 0 && friendPerm.allowSteal) {
             let ok = 0;
             const stolenPlants = [];
             for (let i = 0; i < status.stealable.length; i++) {
@@ -1370,11 +1410,13 @@ class BotInstance extends EventEmitter {
                 const dryNum = p ? toNum(p.dry_num) : 0;
                 const weedNum = p ? toNum(p.weed_num) : 0;
                 const insectNum = p ? toNum(p.insect_num) : 0;
+                const friendPerm = this.getFriendActionPermission(gid);
+                const hasNotifyTarget = !!this.napcatNotify.baseUrl && !!this.napcatNotify.groupId;
                 // 根据开关决定是否有事可做
-                const canSteal = this.featureToggles.autoSteal && stealNum > 0;
-                const canHelp = this.featureToggles.friendHelp && (dryNum > 0 || weedNum > 0 || insectNum > 0);
-                const canNotifyMature = this.napcatNotify.friendMatureEnabled && stealNum > 0;
-                const canNotifyHelp = this.napcatNotify.friendHelpEnabled && (dryNum > 0 || weedNum > 0 || insectNum > 0);
+                const canSteal = friendPerm.allowSteal && stealNum > 0;
+                const canHelp = friendPerm.allowHelp && (dryNum > 0 || weedNum > 0 || insectNum > 0);
+                const canNotifyMature = hasNotifyTarget && friendPerm.allowNotifySteal && stealNum > 0;
+                const canNotifyHelp = hasNotifyTarget && friendPerm.allowNotifyHelp && (dryNum > 0 || weedNum > 0 || insectNum > 0);
                 const canNotify = canNotifyMature || canNotifyHelp;
                 // 有可偷 / 可帮忙 / 仅通知需求 → 访问
                 if (canSteal || canHelp || canNotify) {
@@ -2225,7 +2267,9 @@ class BotInstance extends EventEmitter {
             userState: { ...this.userState },
             farmInterval: this.farmInterval,
             friendInterval: this.friendInterval,
+            friendNotifyCooldownSec: this.friendNotifyCooldownSec,
             friendWhitelist: this.friendWhitelist,
+            friendActionConfig: { ...this.friendActionConfig },
             startedAt: this.startedAt,
             uptime: this.startedAt ? Date.now() - this.startedAt : 0,
             featureToggles: { ...this.featureToggles },
@@ -2344,6 +2388,35 @@ class BotInstance extends EventEmitter {
         this.log('配置', `好友巡查范围已更新: ${mode}`);
     }
 
+    getFriendActionPermission(gid) {
+        const key = String(toNum(gid));
+        const cfg = this.friendActionConfig[key] || {};
+        const legacyNotify = cfg.allowNotify === true;
+        return {
+            allowSteal: cfg.allowSteal === true,
+            allowHelp: cfg.allowHelp === true,
+            allowNotifySteal: cfg.allowNotifySteal !== undefined ? cfg.allowNotifySteal === true : legacyNotify,
+            allowNotifyHelp: cfg.allowNotifyHelp !== undefined ? cfg.allowNotifyHelp === true : legacyNotify,
+        };
+    }
+
+    setFriendActionConfig(config = {}) {
+        this.friendActionConfig = normalizeFriendActionConfig(config);
+        this.log('配置', `好友独立配置已更新: ${Object.keys(this.friendActionConfig).length} 人`);
+    }
+
+    updateFriendActionPermission(gid, partial = {}) {
+        const key = String(toNum(gid));
+        if (!/^\d+$/.test(key)) return;
+        const prev = this.getFriendActionPermission(key);
+        this.friendActionConfig[key] = {
+            allowSteal: partial.allowSteal !== undefined ? !!partial.allowSteal : prev.allowSteal,
+            allowHelp: partial.allowHelp !== undefined ? !!partial.allowHelp : prev.allowHelp,
+            allowNotifySteal: partial.allowNotifySteal !== undefined ? !!partial.allowNotifySteal : prev.allowNotifySteal,
+            allowNotifyHelp: partial.allowNotifyHelp !== undefined ? !!partial.allowNotifyHelp : prev.allowNotifyHelp,
+        };
+    }
+
     setNapcatNotifyConfig(config = {}) {
         if (config.enabled !== undefined) {
             const enabled = !!config.enabled;
@@ -2386,10 +2459,24 @@ class BotInstance extends EventEmitter {
         }
     }
 
+    _isFriendTypeNotifyCooling(gid, type) {
+        const cooldownMs = (this.friendNotifyCooldownSec || 0) * 1000;
+        if (cooldownMs <= 0) return false;
+        const key = `${toNum(gid)}:${type}`;
+        const lastAt = this._friendTypeNotifyAt.get(key) || 0;
+        return Date.now() - lastAt < cooldownMs;
+    }
+
+    _markFriendTypeNotify(gid, type) {
+        const key = `${toNum(gid)}:${type}`;
+        this._friendTypeNotifyAt.set(key, Date.now());
+    }
+
     async notifyFriendMatureIfNeeded(friend, stealableInfo) {
-        if (!this.napcatNotify.friendMatureEnabled) return;
+        if (!this.getFriendActionPermission(friend.gid).allowNotifySteal) return;
         if (!this.napcatNotify.baseUrl || !this.napcatNotify.groupId) return;
         if (!Array.isArray(stealableInfo) || stealableInfo.length === 0) return;
+        if (this._isFriendTypeNotifyCooling(friend.gid, 'steal')) return;
 
         this._cleanupMatureNotifySeen();
         const now = Date.now();
@@ -2434,6 +2521,7 @@ class BotInstance extends EventEmitter {
                     headers,
                 }
             );
+            this._markFriendTypeNotify(friend.gid, 'steal');
             this.log('好友', `NapCat 群通知已发送: ${friend.name || friend.gid} 成熟${newItems.length}块`);
         } catch (err) {
             this.logWarn('好友', `NapCat 群通知失败: ${err.message}`);
@@ -2441,9 +2529,10 @@ class BotInstance extends EventEmitter {
     }
 
     async notifyFriendCareNeedsIfNeeded(friend, status) {
-        if (!this.napcatNotify.friendHelpEnabled) return;
+        if (!this.getFriendActionPermission(friend.gid).allowNotifyHelp) return;
         if (!this.napcatNotify.baseUrl || !this.napcatNotify.groupId) return;
         if (!status) return;
+        if (this._isFriendTypeNotifyCooling(friend.gid, 'help')) return;
 
         const water = Array.isArray(status.needWater) ? status.needWater : [];
         const weed = Array.isArray(status.needWeed) ? status.needWeed : [];
@@ -2509,6 +2598,7 @@ class BotInstance extends EventEmitter {
                     headers,
                 }
             );
+            this._markFriendTypeNotify(friend.gid, 'help');
             this.log('好友', `NapCat 群通知已发送: ${friend.name || friend.gid} 需帮忙${newlyTotal}项`);
         } catch (err) {
             this.logWarn('好友', `NapCat 群通知失败: ${err.message}`);
@@ -2517,7 +2607,7 @@ class BotInstance extends EventEmitter {
 
     /** 重置每日统计 (每日凌晨自动调用) */
     _checkDailyReset() {
-        const today = new Date().toLocaleDateString();
+        const today = getTodayDateStr();
         if (this.dailyStats.date !== today) {
             this.dailyStats = {
                 date: today,

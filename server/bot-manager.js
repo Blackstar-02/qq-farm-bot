@@ -25,6 +25,34 @@ function parseFeatureToggles(raw) {
     }
 }
 
+function parseFriendActionConfig(raw) {
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function parseDailyStats(raw) {
+    if (!raw) return null;
+    if (typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function normalizeNotifyCooldownSec(val, fallback = 60) {
+    const n = Number(val);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.min(86400, Math.trunc(n)));
+}
+
 function resolveNapcatNotifyFlags(raw = {}) {
     const legacyEnabled = !!raw.napcat_notify_enabled;
     const hasMatureFlag = raw.napcat_notify_mature_enabled !== undefined && raw.napcat_notify_mature_enabled !== null;
@@ -157,7 +185,10 @@ class BotManager extends EventEmitter {
             uin, loginCode, url, platform,
             farmInterval: opts.farmInterval || user.farm_interval || CONFIG.farmCheckInterval,
             friendInterval: opts.friendInterval || user.friend_interval || CONFIG.friendCheckInterval,
+            friendNotifyCooldownSec: normalizeNotifyCooldownSec(user.friend_notify_cooldown_sec, 60),
             friendWhitelist: opts.friendWhitelist !== undefined ? String(opts.friendWhitelist || '') : (user.friend_whitelist || ''),
+            friendActionConfig: parseFriendActionConfig(user.friend_action_config),
+            dailyStats: parseDailyStats(user.daily_stats),
             featureToggles: parseFeatureToggles(user.feature_toggles),
             napcatNotifyMatureEnabled: notifyFlags.matureEnabled,
             napcatNotifyHelpEnabled: notifyFlags.helpEnabled,
@@ -257,7 +288,10 @@ class BotManager extends EventEmitter {
             platform: opts.platform || 'qq',
             farmInterval: opts.farmInterval || CONFIG.farmCheckInterval,
             friendInterval: opts.friendInterval || CONFIG.friendCheckInterval,
+            friendNotifyCooldownSec: normalizeNotifyCooldownSec(opts.friendNotifyCooldownSec, 60),
             friendWhitelist: opts.friendWhitelist || '',
+            friendActionConfig: parseFriendActionConfig(opts.friendActionConfig),
+            dailyStats: parseDailyStats(opts.dailyStats),
             preferredSeedId: opts.preferredSeedId || 0,
             featureToggles: parseFeatureToggles(opts.featureToggles),
             napcatNotifyMatureEnabled: opts.napcatNotifyMatureEnabled !== undefined
@@ -280,17 +314,21 @@ class BotManager extends EventEmitter {
 
         bot.on('statusChange', (data) => {
             db.updateUserStatus(uin, data.newStatus);
+            if (data.newStatus !== 'running') {
+                db.updateUser(uin, { daily_stats: JSON.stringify(bot.dailyStats || {}) });
+            }
             this.emit('botStatusChange', data);
         });
 
         bot.on('stateUpdate', (data) => {
-            // 更新 DB 中的游戏状态
-            db.updateUserGameState(uin, {
+            // 更新 DB 中的游戏状态 + 今日统计
+            db.updateUser(uin, {
                 nickname: data.userState.name,
                 gid: data.userState.gid,
                 level: data.userState.level,
                 gold: data.userState.gold,
                 exp: data.userState.exp,
+                daily_stats: JSON.stringify(bot.dailyStats || {}),
             });
             this.emit('botStateUpdate', data);
         });
@@ -328,7 +366,10 @@ class BotManager extends EventEmitter {
             platform: user?.platform || 'qq',
             farmInterval: user?.farm_interval || 10000,
             friendInterval: user?.friend_interval || 10000,
+            friendNotifyCooldownSec: normalizeNotifyCooldownSec(user?.friend_notify_cooldown_sec, 60),
             friendWhitelist: user?.friend_whitelist || '',
+            friendActionConfig: parseFriendActionConfig(user?.friend_action_config),
+            dailyStats: parseDailyStats(user?.daily_stats),
             preferredSeedId: user?.preferred_seed_id || 0,
             featureToggles: parseFeatureToggles(user?.feature_toggles),
             napcatNotifyMatureEnabled: notifyFlags.matureEnabled,
@@ -364,14 +405,16 @@ class BotManager extends EventEmitter {
      * 修改账号配置
      */
     updateAccountConfig(uin, {
-        farmInterval, friendInterval, friendWhitelist, autoStart, platform, preferredSeedId,
+        farmInterval, friendInterval, friendNotifyCooldownSec, friendWhitelist, friendActionConfig, autoStart, platform, preferredSeedId,
         napcatNotifyEnabled, napcatNotifyMatureEnabled, napcatNotifyHelpEnabled,
         napcatBaseUrl, napcatGroupId, napcatAccessToken
     }) {
         const updates = {};
         if (farmInterval !== undefined) updates.farm_interval = farmInterval;
         if (friendInterval !== undefined) updates.friend_interval = friendInterval;
+        if (friendNotifyCooldownSec !== undefined) updates.friend_notify_cooldown_sec = normalizeNotifyCooldownSec(friendNotifyCooldownSec, 60);
         if (friendWhitelist !== undefined) updates.friend_whitelist = String(friendWhitelist || '');
+        if (friendActionConfig !== undefined) updates.friend_action_config = JSON.stringify(parseFriendActionConfig(friendActionConfig));
         if (autoStart !== undefined) updates.auto_start = autoStart ? 1 : 0;
         if (platform !== undefined) updates.platform = platform;
         if (preferredSeedId !== undefined) updates.preferred_seed_id = preferredSeedId;
@@ -393,7 +436,9 @@ class BotManager extends EventEmitter {
         if (bot) {
             if (farmInterval !== undefined) bot.farmInterval = farmInterval;
             if (friendInterval !== undefined) bot.friendInterval = friendInterval;
+            if (friendNotifyCooldownSec !== undefined) bot.friendNotifyCooldownSec = normalizeNotifyCooldownSec(friendNotifyCooldownSec, 60);
             if (friendWhitelist !== undefined) bot.setFriendWhitelist(friendWhitelist);
+            if (friendActionConfig !== undefined) bot.setFriendActionConfig(friendActionConfig);
             if (preferredSeedId !== undefined) bot.setPreferredSeedId(preferredSeedId);
             if (
                 napcatNotifyEnabled !== undefined ||
@@ -430,6 +475,35 @@ class BotManager extends EventEmitter {
         return safeToggles;
     }
 
+    updateAccountFriendConfig(uin, gid, config = {}) {
+        const gidNum = Number(gid);
+        if (!Number.isFinite(gidNum) || gidNum <= 0) {
+            throw new Error('无效的好友 GID');
+        }
+        const user = db.getUserByUin(uin);
+        if (!user) throw new Error('账号不存在');
+
+        const allConfig = parseFriendActionConfig(user.friend_action_config);
+        const key = String(Math.trunc(gidNum));
+        const prev = allConfig[key] && typeof allConfig[key] === 'object' ? allConfig[key] : {};
+        const next = { ...prev };
+        if (config.allowSteal !== undefined) next.allowSteal = !!config.allowSteal;
+        if (config.allowHelp !== undefined) next.allowHelp = !!config.allowHelp;
+        if (config.allowNotify !== undefined) {
+            const enabled = !!config.allowNotify;
+            next.allowNotifySteal = enabled;
+            next.allowNotifyHelp = enabled;
+        }
+        if (config.allowNotifySteal !== undefined) next.allowNotifySteal = !!config.allowNotifySteal;
+        if (config.allowNotifyHelp !== undefined) next.allowNotifyHelp = !!config.allowNotifyHelp;
+        allConfig[key] = next;
+
+        db.updateUser(uin, { friend_action_config: JSON.stringify(allConfig) });
+        const bot = this.bots.get(uin);
+        if (bot) bot.updateFriendActionPermission(key, next);
+        return next;
+    }
+
     // ============================================================
     //  服务器启动时自动恢复
     // ============================================================
@@ -447,7 +521,10 @@ class BotManager extends EventEmitter {
                         platform: user.platform,
                         farmInterval: user.farm_interval,
                         friendInterval: user.friend_interval,
+                        friendNotifyCooldownSec: normalizeNotifyCooldownSec(user.friend_notify_cooldown_sec, 60),
                         friendWhitelist: user.friend_whitelist || '',
+                        friendActionConfig: parseFriendActionConfig(user.friend_action_config),
+                        dailyStats: parseDailyStats(user.daily_stats),
                         preferredSeedId: user.preferred_seed_id || 0,
                         featureToggles: parseFeatureToggles(user.feature_toggles),
                         napcatNotifyMatureEnabled: notifyFlags.matureEnabled,
